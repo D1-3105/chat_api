@@ -36,6 +36,11 @@ def get_ses():
 async def get_async_ses():
     return async_sessionmaker(engine)()
 
+
+async def make_endpoint_ses():
+    async with async_sessionmaker(engine)() as ses:
+        yield ses
+
 """
 class Base(BASE_PARENT, abc.ABC):
     __table_args__ = {'extend_existing': True}

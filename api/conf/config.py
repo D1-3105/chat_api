@@ -25,4 +25,4 @@ def custom_openapi():
     return app.openapi_schema
 
 
-app.openapi_schema = custom_openapi
+app.openapi_schema = custom_openapi()

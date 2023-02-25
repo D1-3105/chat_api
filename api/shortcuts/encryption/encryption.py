@@ -8,6 +8,8 @@ import jwt
 import datetime
 import json
 
+from jwt.exceptions import DecodeError
+
 
 class JWTException(Exception):
     ...

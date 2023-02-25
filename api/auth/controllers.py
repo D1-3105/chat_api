@@ -1,20 +1,19 @@
 # local
-from chat_api.api.conf.db import get_async_ses
+from chat_api.api.conf.db import make_endpoint_ses
 from . import app
-from .serializers import Credentials
-from loggers import auth_logger as logger
+from .serializers import Credentials, BearerToken, UserProfile
 # shortcuts
-from shortcuts.encryption.encryption import JWT
+from shortcuts.encryption.encryption import JWT, JWTException, DecodeError
 # pydantic
-from pydantic import StrictStr
 # fastapi
 from fastapi.responses import JSONResponse
 from fastapi.exceptions import HTTPException
-from fastapi import Depends
+from fastapi import Depends, Request
 #
 from .models import User
 
 import typing
+import datetime
 
 if typing.TYPE_CHECKING:
     from .models import User
@@ -28,6 +27,22 @@ class Authenticator:
     def __init__(self, async_session: 'AsyncSession', credentials: Credentials | dict):
         self.credentials = credentials
         self.async_session = async_session
+
+    @staticmethod
+    async def verify_token(req: Request):
+        token = req.headers.get('Authorization')
+        if not isinstance(token, str):
+            raise HTTPException(status_code=400)
+        prefix, *encrypted = token.split()
+        if isinstance(encrypted, list):
+            encrypted = ''.join(encrypted)
+        try:
+            decrypted = JWT.decrypt(encrypted)
+        except JWTException() as je:
+            raise HTTPException(status_code=403, detail={'error': 'Token expired!'})
+        except DecodeError() as de:
+            raise HTTPException(status_code=401, detail={'error': 'Invalid token'})
+        return decrypted
 
     @classmethod
     def __exec_incorrect_type(cls):
@@ -53,6 +68,16 @@ class Authenticator:
             raise self.__exec_incorrect_type()
         return filtered_users
 
+    @staticmethod
+    async def aencrypt_user(user_instance: 'User'):
+        jwt_object = JWT(
+            data_to_encrypt={
+                'user_id': user_instance.id,
+            }
+        )
+        encrypted_token, expires = jwt_object.perform_encoding()
+        return encrypted_token, expires
+
     async def _acreate_user(self):
         """
         Creates user with given credentials
@@ -72,6 +97,7 @@ class Authenticator:
         else:
             raise self.__exec_incorrect_type()
         user.set_password(raw_password)
+        user.is_active = True
         self.async_session.add(user)
 
         return user
@@ -88,22 +114,43 @@ class Authenticator:
         else:
             user = await self._acreate_user()
             created = True
+            if not user.is_active:
+                raise HTTPException(status_code=403, detail={'error': 'User inactive!'})
+        assert user is not None
+
         return user, created
 
 
 @app.post(
     path='/register/'
 )
-async def get_or_create_user_route(credentials: Credentials):
-    async_session: 'AsyncSession' = await get_async_ses()
+async def get_or_create_user_route(credentials: Credentials, async_session=Depends(make_endpoint_ses)):
     authenticator = Authenticator(async_session, credentials)
     user, created = await authenticator.user_and_marker
-    jwt_object = JWT(
-        data_to_encrypt={
-            'user_id': user.id,
-        }
-    )
-    encrypted_token, created_at = jwt_object.perform_encoding()
+    if created:
+        await async_session.flush()
+    encrypted_token, expires = await authenticator.aencrypt_user(user)
     if created:
         await async_session.commit()
-    return JSONResponse(content={'token': encrypted_token, 'created_at': created_at}, status_code=200 + created)
+    return JSONResponse(content={'token': encrypted_token, 'expire_at': expires}, status_code=200 + created)
+
+
+@app.get(
+    path='/user/profile/',
+    response_model=UserProfile
+)
+async def obtain_user_data(
+        async_ses=Depends(make_endpoint_ses),
+        user_data=Depends(Authenticator.verify_token),
+):
+    user_data: dict
+    user_id = user_data.get('user_id')
+    async_ses: 'AsyncSession'
+    user_instance = await async_ses.get(
+        User, {'id': user_id}
+    )
+    return UserProfile(
+        email=user_instance.email,
+        login=user_instance.login,
+        id=user_instance.id
+    )

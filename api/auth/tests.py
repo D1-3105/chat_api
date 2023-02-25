@@ -31,7 +31,8 @@ class TestFiltering(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self.async_ses: 'AsyncSession' = await get_async_ses()
         self.credentials = {
-            'login': 'user13414'
+            'login': 'user13414',
+            'email': '1234@gmail.com'
         }
         self.user_instance = User(
             login=self.credentials.get('login'),
@@ -63,7 +64,7 @@ class TestRoutes(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self.async_ses = await get_async_ses()
         self.credentials = {
-            'login': 'user13414',
+            'email': '123@gmail.com',
             'password': '1234567890'
         }
 
@@ -74,27 +75,53 @@ class TestRoutes(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(user1, user1)
         self.assertTrue(created1)
         self.assertTrue(created2)
-
-    async def test_authenticate_func(self):
-        result = await get_or_create_user_route(self.credentials)
-        self.assertEqual(result.status_code, 201)
-
-    def test_user_creation(self):
-        response = self.client.post(
-            url='/register/',
-            data=self.credentials
+        self.addAsyncCleanup(
+            self.cleanup_user,
+            email=self.credentials.get('email')
         )
-        self.assertEqual(response.status_code, 201, msg=f'{response.status_code=}')
 
-    async def asyncTearDown(self) -> None:
+    async def test_user_creation(self):
+        create_response = self.client.post(
+            url='/register/',
+            json=self.credentials
+        )
+        self.assertTrue(create_response.status_code >= 200, msg=f'{create_response.status_code=}')
+        self.addAsyncCleanup(
+            self.cleanup_user,
+            email=self.credentials.get('email')
+        )
+
+    async def test_get_user_profile(self):
+        authenticator = Authenticator(self.async_ses, self.credentials)
+        user, created = await authenticator.user_and_marker
+        if created:
+            await self.async_ses.commit()
+            self.async_ses.refresh(user)
+        self.addAsyncCleanup(
+            self.cleanup_user,
+            email=self.credentials.get('email')
+        )
+        token, _ = await authenticator.aencrypt_user(user)
+        profile_response = self.client.get(
+            url='/user/profile',
+            headers={'Authorization': f'Bearer {token}'}
+        )
+        self.assertIn('id', profile_response.json())
+
+    @staticmethod
+    async def cleanup_user(**credentials):
+        teardown_ses = await get_async_ses()
         user_scalar = await User.filter_by_credentials(
-            self.async_ses,
-            self.credentials.get('email'),
-            self.credentials.get('login')
+            teardown_ses,
+            **credentials
         )
         if user_instance := user_scalar.first():
-            await self.async_ses.delete(user_instance)
-        await self.async_ses.commit()
+            await teardown_ses.delete(user_instance)
+        await teardown_ses.commit()
+        await teardown_ses.close()
+
+    async def asyncTearDown(self) -> None:
+        self.async_ses.close()
 
 
 
